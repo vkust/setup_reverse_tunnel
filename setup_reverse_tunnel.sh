@@ -200,7 +200,7 @@ EOF
     cat >> /etc/init.d/reverse-tunnel << EOF
         ${vps_user}@${vps_ip} -y -p ${ssh_port}
     
-    procd_set_param respawn 3600 5 0
+    procd_set_param respawn 5 10 5
     procd_set_param stderr 1
     procd_set_param stdout 1
     procd_close_instance
