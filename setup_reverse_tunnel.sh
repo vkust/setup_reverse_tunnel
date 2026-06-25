@@ -64,15 +64,21 @@ check_installation() {
 }
 
 create_tunnel_alias() {
-    if [ -f /usr/bin/tunnel ] && grep -q "wget -qO - " /usr/bin/tunnel; then
+    # Удаляем старый некорректный ярлык, если он есть
+    if [ -f /usr/bin/tunnel ] && grep -q "wget -qO" /usr/bin/tunnel; then
         rm -f /usr/bin/tunnel
     fi
 
     if [ ! -f /usr/bin/tunnel ]; then
         cat > /usr/bin/tunnel << EOF
 #!/bin/sh
-wget -qO /tmp/tunnel_manager.sh "$SCRIPT_URL"
-sh /tmp/tunnel_manager.sh
+# Используем раздельные флаги или только -O для совместимости с BusyBox
+wget -O /tmp/tunnel_manager.sh "$SCRIPT_URL" >/dev/null 2>&1
+if [ -s /tmp/tunnel_manager.sh ]; then
+    sh /tmp/tunnel_manager.sh
+else
+    printf "\033[1;31m✗ Ошибка: не удалось связаться с сервером для скачивания скрипта.\033[0m\n"
+fi
 EOF
         chmod +x /usr/bin/tunnel
         print_msg "$YELLOW" "💡 В систему добавлена команда 'tunnel'. Теперь вы можете вызывать это меню в любой момент!"
