@@ -71,7 +71,6 @@ create_tunnel_alias() {
     fi
 
     if [ ! -f /usr/bin/tunnel ]; then
-        # Используем EOF без кавычек, чтобы переменная $SCRIPT_URL подставилась прямо сейчас
         cat > /usr/bin/tunnel << EOF
 #!/bin/sh
 wget -qO /tmp/tunnel_manager.sh "$SCRIPT_URL"
@@ -126,6 +125,16 @@ show_current_config() {
         systemctl is-active reverse-tunnel.service
     fi
     echo "------------------------------------------------"
+}
+
+restart_service() {
+    print_msg "$YELLOW" "\nПерезапуск службы..."
+    if [ "$OS_TYPE" = "openwrt" ]; then
+        /etc/init.d/reverse-tunnel restart
+    else
+        systemctl restart reverse-tunnel.service
+    fi
+    print_msg "$GREEN" "✓ Служба успешно перезапущена."
 }
 
 uninstall_service() {
@@ -378,7 +387,8 @@ run_wizard() {
     if [ "$OS_TYPE" = "openwrt" ]; then
         printf "\n${YELLOW}Выберите SSH клиент:${NC}\n"
         printf "1) OpenSSH (рекомендуется для новых VPS серверов)\n2) Dropbear (только если VPS поддерживает RSA-SHA1)\n"
-        read -p "Ваш выбор (1/2) [1]: " ssh_choice
+        printf "Ваш выбор (1/2) [1]: "
+        read ssh_choice
         [ "$ssh_choice" = "2" ] && ssh_type="dropbear"
     fi
 
@@ -426,8 +436,9 @@ main() {
         show_current_config
         printf "\n${YELLOW}Меню управления:${NC}\n"
         printf "  1) Добавить новый туннель к текущим\n"
-        printf "  2) Полностью перенастроить службу (заменить все)\n"
-        printf "  3) ${RED}Удалить службу из системы${NC}\n"
+        printf "  2) Перезапустить службу\n"
+        printf "  3) Полностью перенастроить службу (заменить все)\n"
+        printf "  4) ${RED}Удалить службу из системы${NC}\n"
         printf "  0) Выход\n"
         
         while true; do
@@ -435,10 +446,11 @@ main() {
             read action
             case "$action" in
                 1) add_tunnel_to_existing; break;;
-                2) print_msg "$YELLOW" "Запуск первоначальной настройки..."; run_wizard; break;;
-                3) uninstall_service; break;;
+                2) restart_service; break;;
+                3) print_msg "$YELLOW" "Запуск первоначальной настройки..."; run_wizard; break;;
+                4) uninstall_service; break;;
                 0) exit 0;;
-                *) print_msg "$RED" "Неверный выбор. Введите 1, 2, 3 или 0.";;
+                *) print_msg "$RED" "Неверный выбор. Введите 1, 2, 3, 4 или 0.";;
             esac
         done
     else
