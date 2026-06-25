@@ -65,7 +65,6 @@ check_installation() {
 }
 
 create_tunnel_alias() {
-    # Удаляем старый некорректный ярлык, если он есть
     if [ -f /usr/bin/tunnel ] && grep -q "wget -qO - " /usr/bin/tunnel; then
         rm -f /usr/bin/tunnel
     fi
@@ -193,9 +192,13 @@ setup_ssh() {
             SSH_CMD="dbclient"
         else
             local needs_install=0
+            # Безопасная проверка: смотрим только ssh -V, чтобы не вызвать зависание от ssh-keygen
             if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear; then needs_install=1; fi
-            if ! command -v ssh-keygen >/dev/null 2>&1 || ssh-keygen 2>&1 | grep -qi dropbear; then needs_install=1; fi
-            if [ "$needs_install" -eq 1 ]; then opkg update && opkg install openssh-client openssh-keygen || exit 1; fi
+            if ! command -v ssh-keygen >/dev/null 2>&1; then needs_install=1; fi
+            
+            if [ "$needs_install" -eq 1 ]; then 
+                opkg update && opkg install openssh-client openssh-keygen || exit 1
+            fi
             SSH_CMD="/usr/bin/ssh"
         fi
     else
