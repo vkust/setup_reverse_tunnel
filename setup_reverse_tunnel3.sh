@@ -23,24 +23,17 @@ validate_ip() {
     local ip="$1"
     if echo "$ip" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' >/dev/null; then
         for octet in $(echo "$ip" | tr '.' ' '); do
-            if [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
-                return 1
-            fi
+            if [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then return 1; fi
         done
         return 0
     fi
-    # Простая проверка на доменное имя
-    if echo "$ip" | grep -E '^[a-zA-Z0-9.-]+$' >/dev/null; then
-        return 0
-    fi
+    if echo "$ip" | grep -E '^[a-zA-Z0-9.-]+$' >/dev/null; then return 0; fi
     return 1
 }
 
 validate_port() {
     local port="$1"
-    if echo "$port" | grep -E '^[0-9]+$' >/dev/null && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-        return 0
-    fi
+    if echo "$port" | grep -E '^[0-9]+$' >/dev/null && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then return 0; fi
     return 1
 }
 
@@ -55,14 +48,8 @@ detect_os() {
         elif command -v yum >/dev/null 2>&1; then PKG_MGR="yum"
         elif command -v dnf >/dev/null 2>&1; then PKG_MGR="dnf"
         elif command -v apk >/dev/null 2>&1; then PKG_MGR="apk"
-        else
-            print_msg "$RED" "Не удалось определить пакетный менеджер Linux."
-            exit 1
-        fi
-    else
-        print_msg "$RED" "Скрипт поддерживает только OpenWRT или системы с systemd."
-        exit 1
-    fi
+        else print_msg "$RED" "Не удалось определить пакетный менеджер."; exit 1; fi
+    else print_msg "$RED" "Поддерживается только OpenWRT или systemd."; exit 1; fi
 }
 
 check_installation() {
@@ -73,10 +60,29 @@ check_installation() {
     fi
 }
 
+create_tunnel_alias() {
+    if [ ! -f /usr/bin/tunnel ]; then
+        cat > /usr/bin/tunnel << 'EOF'
+#!/bin/sh
+wget -qO - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel.sh | sh
+EOF
+        chmod +x /usr/bin/tunnel
+        print_msg "$YELLOW" "💡 В систему добавлена команда 'tunnel'. Теперь вы можете вызывать это меню в любой момент!"
+    fi
+}
+
 # --- 2. Функции управления текущей конфигурацией ---
 show_current_config() {
+    local current_client="OpenSSH"
+    if [ "$OS_TYPE" = "openwrt" ]; then
+        if command -v ssh >/dev/null 2>&1 && ssh -V 2>&1 | grep -qi dropbear; then current_client="Dropbear"
+        elif ! command -v ssh >/dev/null 2>&1; then current_client="Dropbear"; fi
+    fi
+
     print_msg "$CYAN" "\nТекущая конфигурация службы:"
     echo "------------------------------------------------"
+    printf "SSH Клиент:  ${GREEN}%s${NC}\n" "$current_client"
+    
     if [ "$OS_TYPE" = "openwrt" ]; then
         local v_ip=$(uci -q get reverse-tunnel.general.vps_ip)
         local v_user=$(uci -q get reverse-tunnel.general.vps_user)
@@ -130,22 +136,15 @@ uninstall_service() {
 
 add_tunnel_to_existing() {
     print_msg "$BLUE" "\n--- Добавление нового туннеля ---"
-    
     while true; do
-        printf "Удаленный порт (на VPS): "
-        read r_port
+        printf "Удаленный порт (на VPS): "; read r_port
         validate_port "$r_port" && break || print_msg "$RED" "✗ Некорректный порт"
     done
-
     while true; do
-        printf "Локальный порт (на устройстве): "
-        read l_port
+        printf "Локальный порт (на устройстве): "; read l_port
         validate_port "$l_port" && break || print_msg "$RED" "✗ Некорректный порт"
     done
-
-    printf "Локальный хост [localhost]: "
-    read l_host
-    l_host=${l_host:-localhost}
+    printf "Локальный хост [localhost]: "; read l_host; l_host=${l_host:-localhost}
 
     if [ "$OS_TYPE" = "openwrt" ]; then
         local section=$(uci add reverse-tunnel tunnel)
@@ -156,46 +155,34 @@ add_tunnel_to_existing() {
         print_msg "$YELLOW" "Перезапуск службы..."
         /etc/init.d/reverse-tunnel restart
     else
-        # Извлекаем текущую команду и добавляем новый -R параметр
         local exec_line=$(grep "^ExecStart=" /etc/systemd/system/reverse-tunnel.service)
-        # Вставляем новый туннель перед логином пользователя
         local new_exec=$(echo "$exec_line" | sed "s/ \([^ ]*@[^ ]* -p [0-9]*\)$/ -R ${r_port}:${l_host}:${l_port} \1/")
         sed -i "s|^ExecStart=.*|$new_exec|" /etc/systemd/system/reverse-tunnel.service
         print_msg "$YELLOW" "Перезапуск службы..."
-        systemctl daemon-reload
-        systemctl restart reverse-tunnel.service
+        systemctl daemon-reload && systemctl restart reverse-tunnel.service
     fi
     print_msg "$GREEN" "✓ Туннель успешно добавлен и запущен!"
 }
 
-# --- 3. Базовые функции установки (из предыдущей версии) ---
-# ... (Здесь располагаются функции setup_ssh, generate_ssh_keys, setup_ssh_config, copy_ssh_key, setup_openwrt, setup_systemd)
-# Чтобы не раздувать ответ, я вынес их без изменений из v3. 
-# В полном скрипте они должны быть здесь!
-
+# --- 3. Базовые функции установки ---
 setup_ssh() {
     local ssh_type="$1"
     if [ "$OS_TYPE" = "openwrt" ]; then
         if [ "$ssh_type" = "dropbear" ]; then
-            if ! command -v dbclient >/dev/null 2>&1; then
-                opkg update && opkg install dropbear || exit 1
-            fi
+            if ! command -v dbclient >/dev/null 2>&1; then opkg update && opkg install dropbear || exit 1; fi
             SSH_CMD="dbclient"
         else
             local needs_install=0
             if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear; then needs_install=1; fi
             if ! command -v ssh-keygen >/dev/null 2>&1 || ssh-keygen 2>&1 | grep -qi dropbear; then needs_install=1; fi
-            if [ "$needs_install" -eq 1 ]; then
-                opkg update && opkg install openssh-client openssh-keygen || exit 1
-            fi
+            if [ "$needs_install" -eq 1 ]; then opkg update && opkg install openssh-client openssh-keygen || exit 1; fi
             SSH_CMD="/usr/bin/ssh"
         fi
     else
         if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
             if [ "$PKG_MGR" = "apt-get" ]; then apt-get update && apt-get install -y openssh-client
             elif [ "$PKG_MGR" = "yum" ] || [ "$PKG_MGR" = "dnf" ]; then $PKG_MGR install -y openssh-clients
-            elif [ "$PKG_MGR" = "apk" ]; then apk add openssh-client
-            fi
+            elif [ "$PKG_MGR" = "apk" ]; then apk add openssh-client; fi
         fi
         SSH_CMD="$(command -v ssh)"
         ssh_type="openssh"
@@ -215,8 +202,7 @@ generate_ssh_keys() {
             ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
         fi
         if [ ! -f /root/.ssh/id_rsa ] || [ ! -f /root/.ssh/id_rsa.pub ]; then
-            print_msg "$RED" "✗ Ошибка: не удалось сгенерировать SSH ключи!"
-            exit 1
+            print_msg "$RED" "✗ Ошибка: не удалось сгенерировать SSH ключи!"; exit 1
         fi
         chmod 600 /root/.ssh/id_rsa
         chmod 644 /root/.ssh/id_rsa.pub
@@ -247,13 +233,19 @@ copy_ssh_key() {
     
     if [ "$ssh_type" = "dropbear" ]; then
         dbclient -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
-        if dbclient -i /root/.ssh/id_rsa -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" 2>/dev/null | grep -q "OK"; then
+        print_msg "$BLUE" "Проверка входа по ключу..."
+        # Закрываем поток ввода, чтобы Dropbear не запрашивал пароль снова, если ключ отвергнут
+        if dbclient -y -i /root/.ssh/id_rsa -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" < /dev/null 2>&1 | grep -q "OK"; then
             print_msg "$GREEN" "✓ Ключ успешно настроен!"
         else
-            print_msg "$RED" "✗ Ошибка проверки ключа."; exit 1
+            print_msg "$RED" "\n✗ Ошибка: VPS отклонил вход по ключу."
+            print_msg "$YELLOW" "ℹ Скорее всего, ваш VPS использует современный Linux (Ubuntu 22.04+), который блокирует старые ключи Dropbear (RSA-SHA1)."
+            print_msg "$YELLOW" "→ Решение: Выберите OpenSSH (пункт 1) при настройке клиента.\n"
+            exit 1
         fi
     else
         ssh -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
+        print_msg "$BLUE" "Проверка входа по ключу..."
         if ssh -p "$ssh_port" -i /root/.ssh/id_rsa -o BatchMode=yes -o PasswordAuthentication=no "${vps_user}@${vps_ip}" "echo OK" 2>/dev/null | grep -q "OK"; then
             print_msg "$GREEN" "✓ Ключ успешно настроен!"
         else
@@ -272,9 +264,7 @@ config reverse-tunnel 'general'
     option vps_ip '${vps_ip}'
 EOF
     for t in $TUNNELS; do
-        r_port=$(echo "$t" | cut -d':' -f1)
-        l_host=$(echo "$t" | cut -d':' -f2)
-        l_port=$(echo "$t" | cut -d':' -f3)
+        r_port=$(echo "$t" | cut -d':' -f1); l_host=$(echo "$t" | cut -d':' -f2); l_port=$(echo "$t" | cut -d':' -f3)
         cat >> /etc/config/reverse-tunnel << EOF
 
 config tunnel
@@ -334,9 +324,7 @@ EOF
 setup_systemd() {
     local TUNNEL_ARGS=""
     for t in $TUNNELS; do
-        r_port=$(echo "$t" | cut -d':' -f1)
-        l_host=$(echo "$t" | cut -d':' -f2)
-        l_port=$(echo "$t" | cut -d':' -f3)
+        r_port=$(echo "$t" | cut -d':' -f1); l_host=$(echo "$t" | cut -d':' -f2); l_port=$(echo "$t" | cut -d':' -f3)
         TUNNEL_ARGS="$TUNNEL_ARGS -R ${r_port}:${l_host}:${l_port}"
     done
     cat > /etc/systemd/system/reverse-tunnel.service << EOF
@@ -379,7 +367,7 @@ run_wizard() {
     ssh_type="openssh"
     if [ "$OS_TYPE" = "openwrt" ]; then
         printf "\n${YELLOW}Выберите SSH клиент:${NC}\n"
-        printf "1) OpenSSH (рекомендуется)\n2) Dropbear (меньше памяти)\n"
+        printf "1) OpenSSH (рекомендуется для новых VPS серверов)\n2) Dropbear (только если VPS поддерживает RSA-SHA1)\n"
         read -p "Ваш выбор (1/2) [1]: " ssh_choice
         [ "$ssh_choice" = "2" ] && ssh_type="dropbear"
     fi
@@ -392,20 +380,11 @@ run_wizard() {
         read vps_ip
         validate_ip "$vps_ip" && break || print_msg "$RED" "✗ Некорректный IP-адрес"
     done
-
-    get_input "Порт SSH на VPS" "22"
-    read ssh_port
-    ssh_port=${ssh_port:-22}
-
-    get_input "Пользователь на VPS" "root"
-    read vps_user
-    vps_user=${vps_user:-root}
+    get_input "Порт SSH на VPS" "22"; read ssh_port; ssh_port=${ssh_port:-22}
+    get_input "Пользователь на VPS" "root"; read vps_user; vps_user=${vps_user:-root}
 
     printf "\n${YELLOW}═══ Настройка туннелей ═══${NC}\n"
-    get_input "Сколько туннелей настроить?" "1"
-    read tunnel_count
-    tunnel_count=${tunnel_count:-1}
-
+    get_input "Сколько туннелей настроить?" "1"; read tunnel_count; tunnel_count=${tunnel_count:-1}
     i=1
     while [ $i -le $tunnel_count ]; do
         printf "\n${CYAN}--- Туннель %d ---${NC}\n" "$i"
@@ -423,7 +402,6 @@ run_wizard() {
 
     if [ "$OS_TYPE" = "openwrt" ]; then setup_openwrt
     else setup_systemd; fi
-
     print_msg "$GREEN" "\n✓ Настройка завершена!"
 }
 
@@ -431,11 +409,11 @@ run_wizard() {
 main() {
     show_header
     detect_os
+    create_tunnel_alias
     check_installation
 
     if [ "$IS_INSTALLED" -eq 1 ]; then
         show_current_config
-        
         printf "\n${YELLOW}Меню управления:${NC}\n"
         printf "  1) Добавить новый туннель к текущим\n"
         printf "  2) Полностью перенастроить службу (заменить все)\n"
