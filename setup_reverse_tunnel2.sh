@@ -73,13 +73,22 @@ setup_ssh() {
         if [ "$ssh_type" = "dropbear" ]; then
             if ! command -v dbclient >/dev/null 2>&1; then
                 print_msg "$BLUE" "Установка Dropbear..."
-                opkg update && opkg install dropbear
+                opkg update && opkg install dropbear || exit 1
             fi
             SSH_CMD="dbclient"
         else
-            if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
-                print_msg "$BLUE" "Установка OpenSSH..."
-                opkg update && opkg install openssh-client openssh-keygen
+            # Умная проверка: если ssh существует, но это symlink на dropbear - ставим настоящий openssh
+            local needs_install=0
+            if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear; then
+                needs_install=1
+            fi
+            if ! command -v ssh-keygen >/dev/null 2>&1 || ssh-keygen 2>&1 | grep -qi dropbear; then
+                needs_install=1
+            fi
+
+            if [ "$needs_install" -eq 1 ]; then
+                print_msg "$BLUE" "Установка полноценного OpenSSH..."
+                opkg update && opkg install openssh-client openssh-keygen || exit 1
             fi
             SSH_CMD="/usr/bin/ssh"
         fi
@@ -114,6 +123,13 @@ generate_ssh_keys() {
         else
             ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
         fi
+        
+        # Проверка успешности генерации
+        if [ ! -f /root/.ssh/id_rsa ] || [ ! -f /root/.ssh/id_rsa.pub ]; then
+            print_msg "$RED" "✗ Ошибка: не удалось сгенерировать SSH ключи!"
+            exit 1
+        fi
+        
         chmod 600 /root/.ssh/id_rsa
         chmod 644 /root/.ssh/id_rsa.pub
     else
@@ -141,15 +157,23 @@ EOF
 # --- 5. Копирование ключа ---
 copy_ssh_key() {
     local ssh_type="$1"
+    
+    local PUB_KEY=$(cat /root/.ssh/id_rsa.pub)
+    if [ -z "$PUB_KEY" ]; then
+        print_msg "$RED" "✗ Ошибка: файл публичного ключа пуст!"
+        exit 1
+    fi
+
     print_msg "$YELLOW" "\nКопирование публичного ключа на VPS..."
     printf "Потребуется ввести пароль от %s@%s\n" "$vps_user" "$vps_ip"
     
-    local PUB_KEY=$(cat /root/.ssh/id_rsa.pub)
     local REMOTE_CMD="mkdir -p ~/.ssh && echo \"$PUB_KEY\" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && chmod 700 ~/.ssh"
     
     if [ "$ssh_type" = "dropbear" ]; then
         dbclient -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
-        if dbclient -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" 2>/dev/null; then
+        print_msg "$BLUE" "Проверка подключения по ключу..."
+        # Dropbear не имеет ключа BatchMode, но мы проверяем авторизацию
+        if dbclient -i /root/.ssh/id_rsa -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" 2>/dev/null | grep -q "OK"; then
             print_msg "$GREEN" "✓ Ключ успешно настроен!"
         else
             print_msg "$RED" "✗ Ошибка проверки ключа."
@@ -157,10 +181,12 @@ copy_ssh_key() {
         fi
     else
         ssh -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
-        if ssh -p "$ssh_port" -i /root/.ssh/id_rsa "${vps_user}@${vps_ip}" "echo OK" 2>/dev/null; then
+        print_msg "$BLUE" "Проверка подключения по ключу..."
+        # Strict auth check: запрещаем ввод пароля при тесте
+        if ssh -p "$ssh_port" -i /root/.ssh/id_rsa -o BatchMode=yes -o PasswordAuthentication=no "${vps_user}@${vps_ip}" "echo OK" 2>/dev/null | grep -q "OK"; then
             print_msg "$GREEN" "✓ Ключ успешно настроен!"
         else
-            print_msg "$RED" "✗ Ошибка проверки ключа."
+            print_msg "$RED" "✗ Ошибка проверки ключа. Возможно, сервер не принял ключ."
             exit 1
         fi
     fi
@@ -168,7 +194,6 @@ copy_ssh_key() {
 
 # --- 6A. Настройка для OpenWRT (Procd + UCI) ---
 setup_openwrt() {
-    # 1. Запись конфига UCI
     mkdir -p /etc/config
     cat > /etc/config/reverse-tunnel << EOF
 config reverse-tunnel 'general'
@@ -191,7 +216,6 @@ config tunnel
 EOF
     done
 
-    # 2. Создание динамического init.d скрипта
     cat > /etc/init.d/reverse-tunnel << 'EOF'
 #!/bin/sh /etc/rc.common
 
@@ -221,8 +245,13 @@ start_service() {
     config_get vps_ip general vps_ip
     config_get ssh_port general ssh_port "22"
     
+    # Определяем реальный клиент
     local ssh_cmd="/usr/bin/ssh"
-    [ -x "/usr/bin/dbclient" ] && ssh_cmd="/usr/bin/dbclient"
+    if command -v ssh >/dev/null 2>&1 && ssh -V 2>&1 | grep -qi dropbear; then
+        ssh_cmd="$(command -v dbclient)"
+    elif ! command -v ssh >/dev/null 2>&1; then
+        ssh_cmd="$(command -v dbclient)"
+    fi
     
     procd_open_instance
     procd_set_param command "$ssh_cmd"
@@ -366,7 +395,6 @@ main() {
         read local_host
         local_host=${local_host:-localhost}
 
-        # Собираем туннели в безопасную строку
         TUNNELS="${TUNNELS}${remote_port}:${local_host}:${local_port} "
         i=$((i + 1))
     done
