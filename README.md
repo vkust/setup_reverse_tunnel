@@ -1,10 +1,10 @@
-# Настройка обратного SSH-туннеля для OpenWRT
+# Настройка обратного SSH-туннеля для OpenWRT и дистрибутивов Linux
 
-Набор скриптов для автоматической настройки обратного SSH-туннеля между OpenWRT и VPS сервером.
+Набор скриптов для автоматической настройки обратного SSH-туннеля между OpenWRT,Linux и VPS сервером.
 
 ## Описание
 
-Эти скрипты автоматизируют процесс настройки безопасного обратного SSH-туннеля, который позволяет получить доступ к устройству OpenWRT через VPS сервер, даже если устройство находится за NAT.
+Эти скрипты автоматизируют процесс настройки безопасного обратного SSH-туннеля, который позволяет получить доступ к устройству OpenWRT,Linux через VPS сервер, даже если устройство находится за NAT.
 
 ### Возможности
 - Поддержка OpenSSH и Dropbear
@@ -27,7 +27,7 @@ sh <(wget -O - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main
 - Создаст скрипт мониторинга туннелей
 - Добавит мониторинг в cron
 
-### 2. Настройка OpenWRT
+### 2. Настройка OpenWRT,Linux
 После настройки VPS, запустите на устройстве OpenWRT:
 ```bash
 sh <(wget -O - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel.sh)
@@ -44,12 +44,12 @@ sh <(wget -O - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main
 
 ## Требования
 - VPS с root доступом
-- Устройство с OpenWRT
+- Устройство с OpenWRT или Linux
 - Доступ к интернету на обоих устройствах
 
 ## После установки
 
-1. Проверьте статус туннеля на OpenWRT:
+1. Проверьте статус туннеля на OpenWRT,Linux:
 ```bash
 /etc/init.d/reverse-tunnel status
 ```
@@ -61,7 +61,7 @@ sh <(wget -O - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main
 
 ## Управление туннелем
 
-На OpenWRT доступны команды:
+На OpenWRT,Linux доступны команды:
 ```bash
 /etc/init.d/reverse-tunnel start    # Запуск туннеля
 /etc/init.d/reverse-tunnel stop     # Остановка туннеля
