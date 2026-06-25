@@ -2,7 +2,7 @@
 
 # Ссылка на этот скрипт (используется для команды tunnel)
 # Если переименуете файл на GitHub, измените название и здесь:
-SCRIPT_URL="https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel3.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel.sh"
 
 # Цвета для вывода
 GREEN='\033[0;32m'
