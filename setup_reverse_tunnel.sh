@@ -1,7 +1,6 @@
 #!/bin/sh
 
 # Ссылка на этот скрипт (используется для команды tunnel)
-# Если переименуете файл на GitHub, измените название и здесь:
 SCRIPT_URL="https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel.sh"
 
 # Цвета для вывода
@@ -156,14 +155,14 @@ uninstall_service() {
 add_tunnel_to_existing() {
     print_msg "$BLUE" "\n--- Добавление нового туннеля ---"
     while true; do
-        printf "Удаленный порт (на VPS): "; read r_port
+        printf "Удаленный порт (на VPS): "; read -r r_port < /dev/tty
         validate_port "$r_port" && break || print_msg "$RED" "✗ Некорректный порт"
     done
     while true; do
-        printf "Локальный порт (на устройстве): "; read l_port
+        printf "Локальный порт (на устройстве): "; read -r l_port < /dev/tty
         validate_port "$l_port" && break || print_msg "$RED" "✗ Некорректный порт"
     done
-    printf "Локальный хост [localhost]: "; read l_host; l_host=${l_host:-localhost}
+    printf "Локальный хост [localhost]: "; read -r l_host < /dev/tty; l_host=${l_host:-localhost}
 
     if [ "$OS_TYPE" = "openwrt" ]; then
         local section=$(uci add reverse-tunnel tunnel)
@@ -192,7 +191,6 @@ setup_ssh() {
             SSH_CMD="dbclient"
         else
             local needs_install=0
-            # Безопасная проверка: смотрим только ssh -V, чтобы не вызвать зависание от ssh-keygen
             if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear; then needs_install=1; fi
             if ! command -v ssh-keygen >/dev/null 2>&1; then needs_install=1; fi
             
@@ -391,7 +389,7 @@ run_wizard() {
         printf "\n${YELLOW}Выберите SSH клиент:${NC}\n"
         printf "1) OpenSSH (рекомендуется для новых VPS серверов)\n2) Dropbear (только если VPS поддерживает RSA-SHA1)\n"
         printf "Ваш выбор (1/2) [1]: "
-        read ssh_choice
+        read -r ssh_choice < /dev/tty
         [ "$ssh_choice" = "2" ] && ssh_type="dropbear"
     fi
 
@@ -400,20 +398,20 @@ run_wizard() {
     printf "\n${YELLOW}═══ Подключение к VPS ═══${NC}\n"
     while true; do
         get_input "IP-адрес VPS сервера" ""
-        read vps_ip
+        read -r vps_ip < /dev/tty
         validate_ip "$vps_ip" && break || print_msg "$RED" "✗ Некорректный IP-адрес"
     done
-    get_input "Порт SSH на VPS" "22"; read ssh_port; ssh_port=${ssh_port:-22}
-    get_input "Пользователь на VPS" "root"; read vps_user; vps_user=${vps_user:-root}
+    get_input "Порт SSH на VPS" "22"; read -r ssh_port < /dev/tty; ssh_port=${ssh_port:-22}
+    get_input "Пользователь на VPS" "root"; read -r vps_user < /dev/tty; vps_user=${vps_user:-root}
 
     printf "\n${YELLOW}═══ Настройка туннелей ═══${NC}\n"
-    get_input "Сколько туннелей настроить?" "1"; read tunnel_count; tunnel_count=${tunnel_count:-1}
+    get_input "Сколько туннелей настроить?" "1"; read -r tunnel_count < /dev/tty; tunnel_count=${tunnel_count:-1}
     i=1
     while [ $i -le $tunnel_count ]; do
         printf "\n${CYAN}--- Туннель %d ---${NC}\n" "$i"
-        while true; do get_input "Удаленный порт (на VPS)" ""; read remote_port; validate_port "$remote_port" && break || print_msg "$RED" "✗ Ошибка"; done
-        while true; do get_input "Локальный порт (на устройстве)" ""; read local_port; validate_port "$local_port" && break || print_msg "$RED" "✗ Ошибка"; done
-        get_input "Локальный хост" "localhost"; read local_host; local_host=${local_host:-localhost}
+        while true; do get_input "Удаленный порт (на VPS)" ""; read -r remote_port < /dev/tty; validate_port "$remote_port" && break || print_msg "$RED" "✗ Ошибка"; done
+        while true; do get_input "Локальный порт (на устройстве)" ""; read -r local_port < /dev/tty; validate_port "$local_port" && break || print_msg "$RED" "✗ Ошибка"; done
+        get_input "Локальный хост" "localhost"; read -r local_host < /dev/tty; local_host=${local_host:-localhost}
         TUNNELS="${TUNNELS}${remote_port}:${local_host}:${local_port} "
         i=$((i + 1))
     done
@@ -446,7 +444,7 @@ main() {
         
         while true; do
             printf "\nВыберите действие: "
-            read action
+            read -r action < /dev/tty
             case "$action" in
                 1) add_tunnel_to_existing; break;;
                 2) restart_service; break;;
