@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# Ссылка на этот скрипт (используется для команды tunnel)
+# Если переименуете файл на GitHub, измените название и здесь:
+SCRIPT_URL="https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel3.sh"
+
 # Цвета для вывода
 GREEN='\033[0;32m'
 RED='\033[1;31m'
@@ -61,10 +65,17 @@ check_installation() {
 }
 
 create_tunnel_alias() {
+    # Удаляем старый некорректный ярлык, если он есть
+    if [ -f /usr/bin/tunnel ] && grep -q "wget -qO - " /usr/bin/tunnel; then
+        rm -f /usr/bin/tunnel
+    fi
+
     if [ ! -f /usr/bin/tunnel ]; then
-        cat > /usr/bin/tunnel << 'EOF'
+        # Используем EOF без кавычек, чтобы переменная $SCRIPT_URL подставилась прямо сейчас
+        cat > /usr/bin/tunnel << EOF
 #!/bin/sh
-wget -qO - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel.sh | sh
+wget -qO /tmp/tunnel_manager.sh "$SCRIPT_URL"
+sh /tmp/tunnel_manager.sh
 EOF
         chmod +x /usr/bin/tunnel
         print_msg "$YELLOW" "💡 В систему добавлена команда 'tunnel'. Теперь вы можете вызывать это меню в любой момент!"
@@ -234,12 +245,11 @@ copy_ssh_key() {
     if [ "$ssh_type" = "dropbear" ]; then
         dbclient -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
         print_msg "$BLUE" "Проверка входа по ключу..."
-        # Закрываем поток ввода, чтобы Dropbear не запрашивал пароль снова, если ключ отвергнут
         if dbclient -y -i /root/.ssh/id_rsa -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" < /dev/null 2>&1 | grep -q "OK"; then
             print_msg "$GREEN" "✓ Ключ успешно настроен!"
         else
             print_msg "$RED" "\n✗ Ошибка: VPS отклонил вход по ключу."
-            print_msg "$YELLOW" "ℹ Скорее всего, ваш VPS использует современный Linux (Ubuntu 22.04+), который блокирует старые ключи Dropbear (RSA-SHA1)."
+            print_msg "$YELLOW" "ℹ Скорее всего, ваш VPS блокирует ключи Dropbear (RSA-SHA1)."
             print_msg "$YELLOW" "→ Решение: Выберите OpenSSH (пункт 1) при настройке клиента.\n"
             exit 1
         fi
