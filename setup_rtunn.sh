@@ -1,7 +1,9 @@
 #!/bin/sh
 
 # Ссылка на этот скрипт (используется для команды tunnel)
-SCRIPT_URL="https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel.sh"
+# По умолчанию — URL того же файла, из которого скрипт был запущен
+# (корректно работает и при переименовании файла в репозитории).
+SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_rtunn.sh}"
 
 # Цвета для вывода
 GREEN='\033[0;32m'
@@ -16,10 +18,11 @@ OS_TYPE=""
 PKG_MGR=""
 IS_INSTALLED=0
 
+# ВНИМАНИЕ: msg не должен содержать символ % (иначе printf воспримет его как формат)
 print_msg() {
     local color="$1"
     local msg="$2"
-    printf "${color}${msg}${NC}\n"
+    printf "${color}%s${NC}\n" "$msg"
 }
 
 validate_ip() {
@@ -259,9 +262,12 @@ copy_ssh_key() {
     local REMOTE_CMD="mkdir -p ~/.ssh && echo \"$PUB_KEY\" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && chmod 700 ~/.ssh"
     
     if [ "$ssh_type" = "dropbear" ]; then
+        # Первый запуск: разрешаем интерактивный ввод пароля (StrictHostKeyChecking=no
+        # dbclient берёт из /etc/ssh/ssh_config, созданного setup_ssh_config)
         dbclient -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
         print_msg "$BLUE" "Проверка входа по ключу..."
-        if dbclient -y -i /root/.ssh/id_rsa -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" < /dev/null 2>&1 | grep -q "OK"; then
+        # -B: не запрашивать пароль (проверяем именно вход по ключу); -n: не читать stdin
+        if dbclient -n -B -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" < /dev/null 2>&1 | grep -q "OK"; then
             print_msg "$GREEN" "✓ Ключ успешно настроен!"
         else
             print_msg "$RED" "\n✗ Ошибка: VPS отклонил вход по ключу."
@@ -337,11 +343,16 @@ start_service() {
     if [ "$ssh_cmd" = "/usr/bin/ssh" ]; then
         procd_append_param command -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes
     else
-        procd_append_param command -K 30
+        # dbclient: keepalive каждые 30 сек (стабильно поддерживается всеми версиями Dropbear)
+        procd_append_param command -o KeepAlive=30
     fi
 
     config_foreach append_tunnel tunnel
-    procd_append_param command "${vps_user}@${vps_ip}" -y -p "${ssh_port}"
+    # dbclient не понимает флаг -y (это опция ssh-keygen), добавляем его только для OpenSSH
+    case "$ssh_cmd" in
+        */dbclient) procd_append_param command "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
+        *) procd_append_param command -y "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
+    esac
     
     # OpenWrt 25 respawn (порог_времени таймаут кол-во_попыток) - 0 для бесконечного рестарта
     procd_set_param respawn 3600 5 0
@@ -385,7 +396,8 @@ EOF
 
 # --- Интерфейс пользователя ---
 show_header() {
-    clear
+    # clear может отсутствовать в минимальных системах (BusyBox без coreutils)
+    command -v clear >/dev/null 2>&1 && clear || printf '\033[2J\033[H'
     printf "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}\n"
     printf "${BLUE}║      Менеджер обратных SSH-туннелей (OpenWRT & Linux)      ║${NC}\n"
     printf "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
@@ -477,4 +489,3 @@ main() {
 }
 
 main "$@"
-```<FollowUp></FollowUp><ElicitationsGroup></ElicitationsGroup>
