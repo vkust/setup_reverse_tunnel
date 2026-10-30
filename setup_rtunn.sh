@@ -81,6 +81,28 @@ pkg_install() {
     esac
 }
 
+# Установка OpenSSH клиента И генератора ключей.
+# ВАЖНО про имена пакетов:
+#  - старый OpenWrt (opkg): openssh-client + отдельный openssh-keygen;
+#  - OpenWrt 25.x (apk): ssh-keygen входит в openssh-client (отдельного пакета нет);
+#  - Debian/Ubuntu/Alpine-linux: ssh-keygen входит в openssh-client;
+#  - RHEL/Fedora: всё в openssh-clients (отдельного openssh-keygen обычно нет).
+install_openssh_pkgs() {
+    if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear \
+       || ! command -v ssh-keygen >/dev/null 2>&1 || is_dropbear_ssh_keygen; then
+        case "$PKG_MGR" in
+            opkg) pkg_install openssh-client openssh-keygen || exit 1 ;;
+            *)    pkg_install openssh-client || exit 1 ;;
+        esac
+    fi
+    # на случай, если в репозитории есть отдельный пакет с ключогенератором
+    if command -v ssh-keygen >/dev/null 2>&1 && is_dropbear_ssh_keygen; then
+        case "$PKG_MGR" in
+            apk) pkg_install openssh-keygen 2>/dev/null || true ;;
+        esac
+    fi
+}
+
 # Определяет, является ли доступный ssh-keygen апплетом Dropbear (есть в базовой
 # системе любого OpenWrt). Апплет Dropbear НЕ поддерживает флаги OpenSSH (-b, -N),
 # и печатает "Unknown argument -b". Возвращает 0, если это Dropbear-апплет.
@@ -246,21 +268,9 @@ setup_ssh() {
             fi
             SSH_CMD="$(command -v dbclient)"
         else
-            local needs_install=0
-            if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear; then needs_install=1; fi
-            # ВАЖНО: в базовой системе OpenWrt /usr/bin/ssh-keygen — апплет Dropbear,
-            # который не понимает флаги OpenSSH (-b/-N). Его наличие НЕ считается за OpenSSH.
-            if ! command -v ssh-keygen >/dev/null 2>&1 || is_dropbear_ssh_keygen; then needs_install=1; fi
-
-            if [ "$needs_install" -eq 1 ]; then
-                # openssh-keygen существует только в старых репозиториях (opkg);
-                # в apk-репозиториях ключогенератор уже входит в openssh-client
-                if [ "$PKG_MGR" = "opkg" ]; then
-                    pkg_install openssh-client openssh-keygen || exit 1
-                else
-                    pkg_install openssh-client || exit 1
-                fi
-            fi
+            # Ставим openssh-client и (если нужен) openssh-keygen — имена пакетов
+            # для opkg/apk/apt/yum корректно подбираются в install_openssh_pkgs.
+            install_openssh_pkgs
             SSH_CMD="$(command -v ssh)"
             # Если пакетный менеджер не смог поставить ssh (например, нет интернета) —
             # не глушим службу пустым путём: падаем сразу с понятной ошибкой.
@@ -271,7 +281,7 @@ setup_ssh() {
             # OpenSSH ssh-keygen обязателен для генерации ключей в режиме OpenSSH
             if ! command -v ssh-keygen >/dev/null 2>&1 || is_dropbear_ssh_keygen; then
                 print_msg "$RED" "✗ Ошибка: OpenSSH 'ssh-keygen' не найден (в PATH остался апплет Dropbear)."
-                print_msg "$YELLOW" "→ Проверьте установку пакета openssh, либо выберите Dropbear (пункт 2)."
+                print_msg "$YELLOW" "→ Проверьте установку пакета openssh-keygen, либо выберите Dropbear (пункт 2)."
                 exit 1
             fi
         fi
@@ -280,7 +290,7 @@ setup_ssh() {
             case "$PKG_MGR" in
                 apt-get) pkg_install openssh-client || exit 1 ;;
                 yum|dnf) pkg_install openssh-clients || exit 1 ;;
-                apk)     pkg_install openssh-client || exit 1 ;;
+                apk)     install_openssh_pkgs ;;
             esac
         fi
         SSH_CMD="$(command -v ssh)"
