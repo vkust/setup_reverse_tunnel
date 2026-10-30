@@ -30,7 +30,7 @@ sh <(wget -O - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main
 ### 2. Настройка OpenWRT,Linux
 После настройки VPS, запустите на устройстве OpenWRT:
 ```bash
-sh <(wget -O - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_rtunn.sh.sh)
+sh <(wget -O - https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_rtunn.sh)
 ```
 
 Скрипт:
