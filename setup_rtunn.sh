@@ -18,6 +18,10 @@ OS_TYPE=""
 PKG_MGR=""
 OPENWRT_25=0
 IS_INSTALLED=0
+# Каталог, где хранится отметка о выбранном SSH-клиенте (openssh|dropbear).
+# Нужен, чтобы последующие запуски (в т.ч. команда 'tunnel') корректно
+# определяли установленную службу даже при перепрошивке/сбое PATH.
+STATE_DIR="/etc/rtunn"
 
 # ВНИМАНИЕ: msg не должен содержать символ % (иначе printf воспримет его как формат)
 print_msg() {
@@ -67,7 +71,26 @@ detect_os() {
         elif command -v dnf >/dev/null 2>&1; then PKG_MGR="dnf"
         elif command -v apk >/dev/null 2>&1; then PKG_MGR="apk"
         else print_msg "$RED" "Не удалось определить пакетный менеджер."; exit 1; fi
-    else print_msg "$RED" "Поддерживается только OpenWRT или systemd."; exit 1; fi
+    else
+        # Раньше здесь был безусловный exit 1 — из-за этого команда 'tunnel' не работала
+        # в окружениях, где нет ни /etc/openwrt_release, ни systemctl (например, LiveCD,
+        # chroot/контейнер без systemd, нестандартный PATH), даже если служба уже была
+        # установлена. Теперь: если служба на диске найдена — продолжаем работу, тип
+        # службы определится позже по файлам (service_kind); пакетный менеджер для
+        # управления службой не нужен.
+        local kind
+        kind="$(installed_kind)"
+        if [ -n "$kind" ]; then
+            case "$kind" in
+                openwrt|openwrt-legacy) OS_TYPE="openwrt"; PKG_MGR="" ;;
+                systemd)                OS_TYPE="systemd"; PKG_MGR="" ;;
+            esac
+            print_msg "$YELLOW" "ℹ ОС не определена стандартными средствами, но служба ($kind) найдена — продолжаю в режиме $kind."
+        else
+            print_msg "$RED" "Поддерживается только OpenWRT или Linux со systemd."
+            exit 1
+        fi
+    fi
 }
 
 # Универсальная установка пакетов: pkg_install <пакет...>
@@ -116,57 +139,121 @@ is_dropbear_ssh_keygen() {
     return 1
 }
 
+# Определяет, установлен ли сервис, по признакам на диске.
+# Возвращает строку "openwrt" | "systemd" | "" (не установлен).
+# ВАЖНО: определяется НЕ по PATH, а по фактическим файлам — чтобы команда
+# 'tunnel' видела службу даже если PATH/окружение отличаются от интерактивного шелла.
+installed_kind() {
+    if [ -f /etc/init.d/rtunn ] || [ -f /etc/config/rtunn ]; then echo "openwrt"; return; fi
+    if [ -f /etc/systemd/system/rtunn.service ]; then echo "systemd"; return; fi
+    # Поддержка старой схемы именования (reverse-tunnel) — чтобы после обновления
+    # прошивки/скрипта ранее созданные службы тоже распознавались.
+    if [ -f /etc/init.d/reverse-tunnel ] || [ -f /etc/config/reverse-tunnel ]; then echo "openwrt-legacy"; return; fi
+    echo ""
+}
+
 check_installation() {
-    if [ "$OS_TYPE" = "openwrt" ] && [ -f /etc/config/rtunn ]; then
-        IS_INSTALLED=1
-    elif [ "$OS_TYPE" = "systemd" ] && [ -f /etc/systemd/system/rtunn.service ]; then
-        IS_INSTALLED=1
+    local kind
+    kind="$(installed_kind)"
+    case "$kind" in
+        openwrt|openwrt-legacy)
+            IS_INSTALLED=1
+            # На устройстве может стоять и OpenWrt, и systemd-версия одновременно
+            # (например, контейнер); приоритет — init-скрипт OpenWrt.
+            ;;
+        systemd)
+            IS_INSTALLED=1
+            ;;
+        *)
+            IS_INSTALLED=0
+            ;;
+    esac
+}
+
+# Сохраняет выбранный SSH-клиент, чтобы последующие запуски ('tunnel')
+# показывали корректную информацию о клиенте.
+save_state() {
+    local ssh_type="$1"
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    [ -n "$ssh_type" ] && printf '%s\n' "$ssh_type" > "$STATE_DIR/client" 2>/dev/null || true
+}
+
+load_state_client() {
+    if [ -f "$STATE_DIR/client" ]; then
+        cat "$STATE_DIR/client" 2>/dev/null
     fi
 }
 
 create_tunnel_alias() {
-    # Удаляем старый некорректный ярлык, если он есть
-    if [ -f /usr/bin/tunnel ] && grep -q "wget -qO" /usr/bin/tunnel; then
-        rm -f /usr/bin/tunnel
-    fi
-
-    if [ ! -f /usr/bin/tunnel ]; then
-        cat > /usr/bin/tunnel << EOF
+    # Всегда перезаписываем ярлык актуальной версией: старые версии ярлыка
+    # могли быть битыми (wget -qO, отсутствие fallback на curl и т.п.),
+    # из-за чего 'tunnel' не запускал менеджер и «не видел» службу.
+    cat > /usr/bin/tunnel << EOF
 #!/bin/sh
-# Скачивание скрипта: wget (BusyBox/OpenWrt) или curl (обычная Linux)
+# Менеджер обратных SSH-туннелей: всегда скачивает свежую версию скрипта
+# и запускает её локальным шеллом (sh), а не через pipe из wget/curl —
+# это важно, т.к. 'sh <(wget ...)' требует bash-процессы и ломается на BusyBox.
+CACHE=/tmp/rtunn_setup.sh
 dl() {
+    rm -f "\$CACHE"
     if command -v wget >/dev/null 2>&1; then
-        wget -O /tmp/tunnel_manager.sh "$SCRIPT_URL" >/dev/null 2>&1
+        wget -q -O "\$CACHE" "$SCRIPT_URL" 2>/dev/null
     elif command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o /tmp/tunnel_manager.sh "$SCRIPT_URL" >/dev/null 2>&1
+        curl -fsSL -o "\$CACHE" "$SCRIPT_URL" 2>/dev/null
+    else
+        return 1
     fi
+    [ -s "\$CACHE" ]
 }
-dl
-if [ ! -s /tmp/tunnel_manager.sh ]; then sleep 2; dl; fi
-if [ -s /tmp/tunnel_manager.sh ]; then
-    sh /tmp/tunnel_manager.sh
+if ! dl; then sleep 2; dl; fi
+if [ -s "\$CACHE" ]; then
+    exec sh "\$CACHE" "\$@"
 else
-    printf "\033[1;31m✗ Ошибка: не удалось связаться с сервером для скачивания скрипта.\033[0m\n"
+    printf "\033[1;31m✗ Ошибка: не удалось скачать скрипт менеджера (проверьте интернет/DNS на устройстве).\033[0m\n"
+    exit 1
 fi
 EOF
-        chmod +x /usr/bin/tunnel
-        print_msg "$YELLOW" "💡 В систему добавлена команда 'tunnel'. Теперь вы можете вызывать это меню в любой момент!"
-    fi
+    chmod 755 /usr/bin/tunnel
+    print_msg "$YELLOW" "💡 Команда 'tunnel' обновлена/установлена. Теперь вы можете вызывать это меню в любой момент!"
 }
 
 # --- 2. Функции управления текущей конфигурацией ---
+
+# Тип установленной службы ("openwrt" | "systemd") — берётся из фактических
+# файлов на диске, а НЕ из OS_TYPE: при запуске через 'tunnel' система может
+# определяться иначе (или не определяться вовсе), но служба-то на месте.
+service_kind() {
+    local kind
+    kind="$(installed_kind)"
+    case "$kind" in
+        openwrt|openwrt-legacy) echo "openwrt" ;;
+        systemd)                echo "systemd" ;;
+        *)                      echo "" ;;
+    esac
+}
+
 show_current_config() {
     local current_client="OpenSSH"
-    if [ "$OS_TYPE" = "openwrt" ]; then
-        if command -v ssh >/dev/null 2>&1 && ssh -V 2>&1 | grep -qi dropbear; then current_client="Dropbear"
-        elif ! command -v ssh >/dev/null 2>&1; then current_client="Dropbear"; fi
+    if [ "$(service_kind)" = "openwrt" ]; then
+        # Сначала смотрим сохранённую отметку о выбранном клиенте, затем PATH.
+        local saved
+        saved="$(load_state_client)"
+        if [ "$saved" = "dropbear" ]; then
+            current_client="Dropbear"
+        elif [ -n "$saved" ]; then
+            current_client="OpenSSH"
+        elif command -v ssh >/dev/null 2>&1 && ssh -V 2>&1 | grep -qi dropbear; then
+            current_client="Dropbear"
+        elif ! command -v ssh >/dev/null 2>&1; then
+            current_client="Dropbear"
+        fi
     fi
 
     print_msg "$CYAN" "\nТекущая конфигурация службы:"
     echo "------------------------------------------------"
     printf "SSH Клиент:  ${GREEN}%s${NC}\n" "$current_client"
     
-    if [ "$OS_TYPE" = "openwrt" ]; then
+    if [ "$(service_kind)" = "openwrt" ]; then
         local v_ip=$(uci -q get rtunn.general.vps_ip)
         local v_user=$(uci -q get rtunn.general.vps_user)
         local v_port=$(uci -q get rtunn.general.ssh_port)
@@ -202,7 +289,7 @@ show_current_config() {
 
 restart_service() {
     print_msg "$YELLOW" "\nПерезапуск службы..."
-    if [ "$OS_TYPE" = "openwrt" ]; then
+    if [ "$(service_kind)" = "openwrt" ]; then
         /etc/init.d/rtunn restart
     else
         systemctl restart rtunn.service
@@ -212,7 +299,7 @@ restart_service() {
 
 uninstall_service() {
     print_msg "$YELLOW" "\nОстановка и удаление службы..."
-    if [ "$OS_TYPE" = "openwrt" ]; then
+    if [ "$(service_kind)" = "openwrt" ]; then
         /etc/init.d/rtunn stop >/dev/null 2>&1
         /etc/init.d/rtunn disable >/dev/null 2>&1
         rm -f /etc/init.d/rtunn
@@ -223,6 +310,8 @@ uninstall_service() {
         rm -f /etc/systemd/system/rtunn.service
         systemctl daemon-reload
     fi
+    # Удаляем отметку о клиенте, чтобы следующий мастер настройки не наследовал старое значение
+    rm -rf "$STATE_DIR" 2>/dev/null || true
     print_msg "$GREEN" "✓ Служба успешно удалена из системы."
     IS_INSTALLED=0
 }
@@ -239,7 +328,7 @@ add_tunnel_to_existing() {
     done
     printf "Локальный хост [localhost]: "; read -r l_host < /dev/tty; l_host=${l_host:-localhost}
 
-    if [ "$OS_TYPE" = "openwrt" ]; then
+    if [ "$(service_kind)" = "openwrt" ]; then
         local section=$(uci add rtunn tunnel)
         uci set rtunn.${section}.remote_port="$r_port"
         uci set rtunn.${section}.local_port="$l_port"
@@ -590,6 +679,7 @@ run_wizard() {
 
     if [ "$OS_TYPE" = "openwrt" ]; then setup_openwrt
     else setup_systemd; fi
+    save_state "$ssh_type"
     print_msg "$GREEN" "\n✓ Настройка завершена!"
 }
 
@@ -601,6 +691,16 @@ main() {
     check_installation
 
     if [ "$IS_INSTALLED" -eq 1 ]; then
+        # Если служба найдена на диске, но текущая ОС определена иначе
+        # (например, запуск через 'tunnel' в нестандартном окружении) —
+        # приводим OS_TYPE к типу найденной службы, чтобы меню работало корректно.
+        local skind
+        skind="$(service_kind)"
+        if [ "$skind" = "openwrt" ] && [ "$OS_TYPE" != "openwrt" ]; then
+            OS_TYPE="openwrt"
+        elif [ "$skind" = "systemd" ] && [ "$OS_TYPE" != "systemd" ]; then
+            OS_TYPE="systemd"
+        fi
         show_current_config
         printf "\n${YELLOW}Меню управления:${NC}\n"
         printf "  1) Добавить новый туннель к текущим\n"
