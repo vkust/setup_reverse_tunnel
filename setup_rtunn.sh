@@ -24,10 +24,13 @@ IS_INSTALLED=0
 STATE_DIR="/etc/rtunn"
 
 # ВНИМАНИЕ: msg не должен содержать символ % (иначе printf воспримет его как формат)
+# Поддержка \n: вызывающий код может передавать literal "\n" (например "\nЗаголовок"),
+# print_msg преобразует их в реальные переводы строки через printf '%b'.
 print_msg() {
     local color="$1"
     local msg="$2"
-    printf "${color}%s${NC}\n" "$msg"
+    # shellcheck disable=SC2059
+    printf "${color}%b${NC}\n" "$msg"
 }
 
 validate_ip() {
