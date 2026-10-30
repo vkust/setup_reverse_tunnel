@@ -81,6 +81,19 @@ pkg_install() {
     esac
 }
 
+# Определяет, является ли доступный ssh-keygen апплетом Dropbear (есть в базовой
+# системе любого OpenWrt). Апплет Dropbear НЕ поддерживает флаги OpenSSH (-b, -N),
+# и печатает "Unknown argument -b". Возвращает 0, если это Dropbear-апплет.
+is_dropbear_ssh_keygen() {
+    command -v ssh-keygen >/dev/null 2>&1 || return 1
+    # вариант 1: вывод версии содержит dropbear
+    if ssh-keygen -V 2>&1 | grep -qi dropbear; then return 0; fi
+    # вариант 2: вызов с заведомо неизвестным флагом — у OpenSSH это "unknown option",
+    # у Dropbear-апплета — строка "Unknown argument"
+    if ssh-keygen -% 2>&1 | grep -q "Unknown argument"; then return 0; fi
+    return 1
+}
+
 check_installation() {
     if [ "$OS_TYPE" = "openwrt" ] && [ -f /etc/config/rtunn ]; then
         IS_INSTALLED=1
@@ -235,7 +248,9 @@ setup_ssh() {
         else
             local needs_install=0
             if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear; then needs_install=1; fi
-            if ! command -v ssh-keygen >/dev/null 2>&1; then needs_install=1; fi
+            # ВАЖНО: в базовой системе OpenWrt /usr/bin/ssh-keygen — апплет Dropbear,
+            # который не понимает флаги OpenSSH (-b/-N). Его наличие НЕ считается за OpenSSH.
+            if ! command -v ssh-keygen >/dev/null 2>&1 || is_dropbear_ssh_keygen; then needs_install=1; fi
 
             if [ "$needs_install" -eq 1 ]; then
                 # openssh-keygen существует только в старых репозиториях (opkg);
@@ -249,8 +264,14 @@ setup_ssh() {
             SSH_CMD="$(command -v ssh)"
             # Если пакетный менеджер не смог поставить ssh (например, нет интернета) —
             # не глушим службу пустым путём: падаем сразу с понятной ошибкой.
-            if [ -z "$SSH_CMD" ]; then
-                print_msg "$RED" "✗ Ошибка: после установки команда 'ssh' так и не найдена в PATH."
+            if [ -z "$SSH_CMD" ] || ssh -V 2>&1 | grep -qi dropbear; then
+                print_msg "$RED" "✗ Ошибка: после установки настоящий OpenSSH 'ssh' так и не найден в PATH."
+                exit 1
+            fi
+            # OpenSSH ssh-keygen обязателен для генерации ключей в режиме OpenSSH
+            if ! command -v ssh-keygen >/dev/null 2>&1 || is_dropbear_ssh_keygen; then
+                print_msg "$RED" "✗ Ошибка: OpenSSH 'ssh-keygen' не найден (в PATH остался апплет Dropbear)."
+                print_msg "$YELLOW" "→ Проверьте установку пакета openssh, либо выберите Dropbear (пункт 2)."
                 exit 1
             fi
         fi
@@ -280,15 +301,40 @@ generate_ssh_keys() {
                 dropbearkey -y -f /root/.ssh/id_rsa | grep "^ssh-rsa" > /root/.ssh/id_rsa.pub
             elif command -v ssh-keygen >/dev/null 2>&1; then
                 print_msg "$YELLOW" "ℹ dropbearkey не найден — генерирую ключ через ssh-keygen."
-                ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
+                # Флаги подбираем по типу ssh-keygen: апплет Dropbear не понимает -b/-N
+                if is_dropbear_ssh_keygen; then
+                    ssh-keygen -t rsa -f /root/.ssh/id_rsa
+                    ssh-keygen -y -f /root/.ssh/id_rsa > /root/.ssh/id_rsa.pub
+                else
+                    ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N "" </dev/null
+                fi
             else
                 print_msg "$RED" "✗ Ошибка: нет ни dropbearkey, ни ssh-keygen для генерации ключа!"
                 exit 1
             fi
         else
-            ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
+            # ВАЖНО: в базовой системе OpenWrt /usr/bin/ssh-keygen — это апплет Dropbear,
+            # который НЕ понимает флаги OpenSSH (-b 4096, -N ""). Он умеет только
+            # -t rsa|ed25519 -f FILE [-s bits] [-C comment]. Поэтому ключ генерируется
+            # через dropbearkey (тот же формат, что и у dropbear-апплета ssh-keygen),
+            # а настоящий OpenSSH ssh-keygen используется только если это именно он.
+            if command -v dropbearkey >/dev/null 2>&1 && is_dropbear_ssh_keygen; then
+                print_msg "$BLUE" "ℹ Обнаружен Dropbear ssh-keygen — использую dropbearkey для совместимости."
+                dropbearkey -t rsa -f /root/.ssh/id_rsa
+                dropbearkey -y -f /root/.ssh/id_rsa | sed -n 's/^ssh-rsa /ssh-rsa /p' > /root/.ssh/id_rsa.pub
+            elif is_dropbear_ssh_keygen; then
+                print_msg "$RED" "✗ Ошибка: ssh-keygen в системе — апплет Dropbear, но dropbearkey не найден!"
+                exit 1
+            else
+                ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N "" </dev/null
+            fi
         fi
-        if [ ! -f /root/.ssh/id_rsa ] || [ ! -f /root/.ssh/id_rsa.pub ]; then
+        # Пустой .pub = падение генерации (например, unsupported key type) — удаляем,
+        # чтобы при следующем запуске ключ пересоздался корректно.
+        if [ -f /root/.ssh/id_rsa.pub ] && [ ! -s /root/.ssh/id_rsa.pub ]; then
+            rm -f /root/.ssh/id_rsa /root/.ssh/id_rsa.pub
+        fi
+        if [ ! -f /root/.ssh/id_rsa ] || [ ! -s /root/.ssh/id_rsa.pub ]; then
             print_msg "$RED" "✗ Ошибка: не удалось сгенерировать SSH ключи!"; exit 1
         fi
         chmod 600 /root/.ssh/id_rsa
@@ -307,6 +353,16 @@ Host *
     ServerAliveCountMax 3
     StrictHostKeyChecking no
 EOF
+    fi
+    # OpenSSH не пишет known_hosts в /root/.ssh, если каталога нет (а служба стартует
+    # до создания ~/.ssh) — создаём заранее и прогреваем ключ хоста VPS интерактивно.
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    if command -v ssh >/dev/null 2>&1 && ! ssh -V 2>&1 | grep -qi dropbear; then
+        ssh -p "${ssh_port:-22}" -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/root/.ssh/known_hosts \
+            -o BatchMode=yes -o ConnectTimeout=10 \
+            "${vps_user:-root}@${vps_ip}" "true" </dev/null >/dev/null 2>&1 || true
     fi
 }
 
@@ -420,10 +476,11 @@ start_service() {
     esac
 
     config_foreach append_tunnel tunnel
-    # dbclient не понимает флаг -y (это опция ssh-keygen), добавляем его только для OpenSSH
+    # dbclient не понимает OpenSSH-флаги; для OpenSSH задаём явный known_hosts,
+    # т.к. в procd нет TTY и интерактивное подтверждение ключа хоста невозможно
     case "$ssh_cmd" in
         */dbclient) procd_append_param command "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
-        *) procd_append_param command -y "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
+        *) procd_append_param command -o "UserKnownHostsFile=/root/.ssh/known_hosts" "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
     esac
     
     # OpenWrt 25 respawn (порог_времени таймаут кол-во_попыток) - 0 для бесконечного рестарта
