@@ -1,6 +1,6 @@
 # Руководство по ручной настройке обратного SSH-туннеля
 
-В этом руководстве описан процесс ручной настройки обратного SSH-туннеля между устройством OpenWRT и VPS сервером.
+В этом руководстве описан процесс ручной настройки обратного SSH-туннеля между устройством OpenWRT/Linux и VPS сервером. Автоматизированная версия этой настройки — скрипты `setup_vps.sh` (VPS) и `setup_rtunn.sh` (устройство), см. [README](README.md).
 
 ## Содержание
 - [Настройка VPS сервера](#настройка-vps-сервера)
@@ -8,7 +8,7 @@
   - [Настройка Firewall](#2-настройка-firewall)
   - [Настройка параметров ядра](#3-настройка-параметров-ядра)
   - [Настройка Fail2Ban](#4-настройка-fail2ban)
-- [Настройка OpenWRT](#настройка-openwrt)
+- [Настройка OpenWRT / Linux](#настройка-openwrt--linux)
   - [Установка SSH](#1-установка-ssh)
   - [Генерация SSH ключей](#2-генерация-ssh-ключей)
   - [Копирование ключа на VPS](#3-копирование-ключа-на-vps)
@@ -18,6 +18,8 @@
   - [Проверка работы](#7-проверка-работы)
 
 ## Настройка VPS сервера
+
+> **Поддерживаемые дистрибутивы VPS:** Debian/Ubuntu (apt), RHEL/CentOS/Fedora (dnf/yum), Alpine (apk). Автоматизированный установщик `setup_vps.sh` работает на любом из них; в примерах ниже команды приведены для apt — заменяйте `apt install` на `dnf/yum install` или `apk add` по необходимости. Скрипт `setup_vps.sh` НЕ рассчитан на OpenWrt (для роутера служит `setup_rtunn.sh`).
 
 ### 1. Настройка SSH
 
@@ -29,14 +31,23 @@ nano /etc/ssh/sshd_config
 2. Добавьте или измените следующие параметры:
 ```
 AllowTcpForwarding yes
-GatewayPorts yes
+GatewayPorts clientspecified
 ClientAliveInterval 30
 ClientAliveCountMax 3
+PermitRootLogin yes
+PasswordAuthentication yes
 ```
+
+> `GatewayPorts clientspecified` означает, что форвард слушает тот адрес, который явно запросил клиент (`-R 0.0.0.0:порт:...` — на внешнем интерфейсе, `-R порт:...` — только на localhost). Это безопаснее устаревшего `GatewayPorts yes`, включающего все форварды на 0.0.0.0. Установщик устройства (`setup_rtunn.sh`) формирует аргументы `-R` с учётом этого режима. Параметр `ChallengeResponseAuthentication` в новых OpenSSH (≥8.7) исключён — вместо него используется `KbdInteractiveAuthentication`.
 
 3. Перезапустите SSH сервер:
 ```bash
+# Debian/Ubuntu (юнит называется ssh):
+systemctl restart ssh
+# RHEL/Fedora/Alpine (юнит sshd):
 systemctl restart sshd
+# Системы без systemd:
+service ssh restart   # или /etc/init.d/sshd restart
 ```
 
 ### 2. Настройка Firewall
@@ -78,7 +89,13 @@ iptables -P INPUT DROP
 # Сохранение правил
 mkdir -p /etc/iptables
 iptables-save > /etc/iptables/rules.v4
+
+# Автозагрузка правил при старте системы (если нет iptables-persistent/netfilter-persistent)
+# установщик добавляет в /etc/rc.local перед exit 0:
+#   iptables-restore < /etc/iptables/rules.v4
 ```
+
+> Автоматический установщик `setup_vps.sh` дополнительно сохраняет бэкап текущих правил перед изменениями в `/root/firewall_backup/iptables_backup_<дата_время>.rules` (для UFW — `ufw_backup_<дата_время>.rules`). В дистрибутивах без UFW (RHEL/Fedora, Alpine) установщик автоматически предлагает IPTables. Пакеты сохранения правил называются по-разному: Debian/Ubuntu — `iptables-persistent`, RHEL/Fedora — `iptables-services`, Alpine — `iptables`.
 
 ### 3. Настройка параметров ядра
 ```bash
@@ -140,24 +157,36 @@ fail2ban-client get sshd banip
 fail2ban-client set sshd unbanip IP_АДРЕС
 ```
 
-## Настройка OpenWRT
+## Настройка OpenWRT / Linux
+
+> Актуальный автоматизированный установщик для устройства — `setup_rtunn.sh` (раздел «Использование» в [README](README.md)). Он поддерживает старые версии OpenWrt (opkg), **OpenWrt 25.x, где opkg заменён на apk**, и обычный Linux (apt/dnf/yum/apk + systemd). Ниже — ручные шаги для понимания процесса.
 
 ### 1. Установка SSH
 
 #### Для OpenSSH:
 ```bash
+# Старый OpenWrt (до 25.x):
 opkg update
-opkg install openssh-server openssh-sftp-server openssh-keygen
-/etc/init.d/sshd enable
-/etc/init.d/sshd start
+opkg install openssh-client openssh-keygen
+
+# OpenWrt 25.x (пакетный менеджер apk; openssh-keygen — отдельный пакет):
+apk update
+apk add openssh-client
+apk add openssh-keygen   # без него /usr/bin/ssh-keygen остаётся апплетом Dropbear
+
+# Обычный Linux (демон sshd на роутере не нужен, достаточно клиента):
+apt install openssh-client    # Debian/Ubuntu
+dnf install openssh-clients   # Fedora/RHEL
 ```
+
+> Важно: в базовой системе любого OpenWrt `/usr/bin/ssh`, `/usr/bin/ssh-keygen` могут быть симлинками на апплеты Dropbear. Пока не установлен пакет `openssh-client` (+ `openssh-keygen` на apk-сборках), команда `ssh-keygen -t rsa -b 4096 ...` упадёт с ошибкой `Unknown argument -b` — флаги `-b/-N` понимает только настоящий OpenSSH keygen. Альтернатива — использовать режим Dropbear (см. ниже), он не требует установки пакетов.
 
 #### Для Dropbear:
 ```bash
-opkg update
-opkg install dropbear
-/etc/init.d/dropbear enable
-/etc/init.d/dropbear start
+# Dropbear (ssh-сервер dbclient/dropbearkey) входит в базовую систему OpenWrt —
+# отдельно устанавливать ничего не нужно. Проверка:
+dbclient -V
+dropbearkey -h
 ```
 
 ### 2. Генерация SSH ключей
@@ -191,18 +220,18 @@ cat /root/.ssh/id_rsa.pub | dbclient -p ПОРТ user@VPS_IP "mkdir -p ~/.ssh &&
 1. Создайте файл конфигурации:
 ```bash
 mkdir -p /etc/config
-nano /etc/config/reverse-tunnel
+nano /etc/config/rtunn
 ```
 
 2. Добавьте конфигурацию:
 ```
-config reverse-tunnel 'general'
+config rtunn 'general'
     option enabled '1'
     option ssh_port 'SSH_ПОРТ'
     option vps_user 'ИМЯ_ПОЛЬЗОВАТЕЛЯ'
     option vps_ip 'IP_АДРЕС_VPS'
 
-config tunnel
+config rtunn 'tunnel'
     option remote_port 'УДАЛЕННЫЙ_ПОРТ'
     option local_port 'ЛОКАЛЬНЫЙ_ПОРТ'
     option local_host 'localhost'
@@ -210,7 +239,7 @@ config tunnel
 
 3. Создайте init.d скрипт:
 ```bash
-nano /etc/init.d/reverse-tunnel
+nano /etc/init.d/rtunn
 ```
 
 4. Добавьте содержимое:
@@ -221,33 +250,74 @@ START=99
 STOP=15
 USE_PROCD=1
 
+append_tunnel() {
+    local cfg="$1"
+    local remote_port local_port local_host
+    config_get remote_port "$cfg" remote_port
+    config_get local_port "$cfg" local_port
+    config_get local_host "$cfg" local_host "localhost"
+    procd_append_param command -R "${remote_port}:${local_host}:${local_port}"
+}
+
 start_service() {
+    config_load rtunn
+    local enabled vps_user vps_ip ssh_port ssh_cmd
+    config_get_bool enabled general enabled 1
+    [ "$enabled" -eq 1 ] || return 0
+    config_get vps_user general vps_user "root"
+    config_get vps_ip general vps_ip
+    config_get ssh_port general ssh_port "22"
+
+    # OpenSSH, если реально установлен; иначе dbclient (есть в любой сборке OpenWrt)
+    if command -v ssh >/dev/null 2>&1 && ! ssh -V 2>&1 | grep -qi dropbear; then
+        ssh_cmd="$(command -v ssh)"
+    elif command -v dbclient >/dev/null 2>&1; then
+        ssh_cmd="$(command -v dbclient)"
+    else
+        echo "rtunn: не найден ни ssh, ни dbclient" >&2
+        return 1
+    fi
+
     procd_open_instance
-    procd_set_param command ssh -NT -i /root/.ssh/id_rsa \
-        -R ПОРТ_ТУННЕЛЯ:localhost:ЛОКАЛЬНЫЙ_ПОРТ \
-        user@VPS_IP -p SSH_ПОРТ
-    
+    procd_set_param command "$ssh_cmd"
+    procd_append_param command -NT -i /root/.ssh/id_rsa
+
+    case "$ssh_cmd" in
+        */dbclient)
+            procd_append_param command -o KeepAlive=30
+            ;;
+        *)
+            procd_append_param command -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+                -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes \
+                -o UserKnownHostsFile=/root/.ssh/known_hosts
+            ;;
+    esac
+
+    config_foreach append_tunnel tunnel
+    case "$ssh_cmd" in
+        */dbclient) procd_append_param command "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
+        *)          procd_append_param command "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
+    esac
+
     procd_set_param respawn 3600 5 0
     procd_set_param stderr 1
     procd_set_param stdout 1
     procd_close_instance
 }
 
-service_triggers() {
-    procd_add_reload_trigger "reverse-tunnel"
-}
-
-reload_service() {
-    stop
-    start
-}
+service_triggers() { procd_add_reload_trigger "rtunn"; }
+reload_service() { stop; start; }
 ```
+
+> Примечания: у `dbclient` нет флагов `-o ServerAliveInterval` и `-y` — для Dropbear используется `-o KeepAlive=30`; OpenSSH-клиенту в демоне (без TTY) нужны `StrictHostKeyChecking=no` и заранее прогретый `known_hosts`. Флаг `-y` у OpenSSH означает «использовать системный ключ хоста» и к известным хостам отношения не имеет — не используйте его здесь.
+
+На Linux (systemd) вместо init.d создаётся unit `/etc/systemd/system/rtunn.service` с `ExecStart=/usr/bin/ssh -NT -i /root/.ssh/id_rsa -o ServerAliveInterval=30 ... -R УДАЛЕННЫЙ_ПОРТ:ЛОКАЛЬНЫЙ_ХОСТ:ЛОКАЛЬНЫЙ_ПОРТ user@VPS_IP -p SSH_ПОРТ` и `Restart=always`.
 
 ### 5. Настройка прав и запуск
 ```bash
-chmod +x /etc/init.d/reverse-tunnel
-/etc/init.d/reverse-tunnel enable
-/etc/init.d/reverse-tunnel start
+chmod +x /etc/init.d/rtunn
+/etc/init.d/rtunn enable
+/etc/init.d/rtunn start
 ```
 
 ### 6. Мониторинг туннеля на VPS
@@ -263,8 +333,16 @@ nano /root/check_tunnels.sh
 
 printf "Проверка статуса туннелей...\n\n"
 
-# Получаем список портов из конфигурации
-PORTS=$(netstat -tlpn | grep ssh | awk '{print $4}' | cut -d: -f2)
+# Список портов туннелей задаёт установщик setup_vps.sh (или укажите вручную):
+TUNNEL_PORTS="10022 10080"
+
+if [ -n "$TUNNEL_PORTS" ]; then
+    PORTS="$TUNNEL_PORTS"
+else
+    # Fallback: все слушающие ssh-порты, КРОМЕ порта SSH самого VPS (22) —
+    # иначе обычный sshd учитывался бы как «туннель»
+    PORTS=$( (ss -tlpn 2>/dev/null || netstat -tlpn 2>/dev/null) | grep ssh | awk '{print $4}' | cut -d: -f2 | grep -vx 22 | sort -u)
+fi
 
 if [ -z "$PORTS" ]; then
     printf "Активных SSH туннелей не обнаружено\n"
@@ -274,10 +352,11 @@ fi
 
 printf "Обнаружены порты: %s\n\n" "$PORTS"
 
-# Проверка активных туннелей
 FOUND=0
+TOTAL=0
 for port in $PORTS; do
-    if ! netstat -an | grep "LISTEN" | grep ":$port " > /dev/null; then
+    TOTAL=$((TOTAL + 1))
+    if ! netstat -an 2>/dev/null | grep "LISTEN" | grep ":$port " > /dev/null; then
         printf "\033[31m✗ Туннель на порту %s не активен\033[0m\n" "$port"
         logger "Reverse tunnel on port $port is down"
     else
@@ -286,8 +365,11 @@ for port in $PORTS; do
     fi
 done
 
-printf "\nИтого: активно %d из %d туннелей\n" "$FOUND" "$(echo "$PORTS" | wc -w)"
+printf "\nИтого: активно %d из %d туннелей\n" "$FOUND" "$TOTAL"
+[ "$FOUND" -gt 0 ] || exit 2
 ```
+
+> Смысл: проверяются конкретные настроенные порты туннелей (их подставляет `setup_vps.sh` при генерации скрипта), а не «все ssh-порты» — порт 22 самого VPS туннелем не является. Значения exit-кодов: 0 — всё в порядке, 1 — список портов пуст, 2 — ни один туннель не активен (удобно для алертов из cron).
 
 3. Настройте права и добавьте в cron:
 ```bash
@@ -298,7 +380,9 @@ chmod +x /root/check_tunnels.sh
 ### 7. Проверка работы
 ```bash
 # На OpenWRT
-/etc/init.d/reverse-tunnel status
+/etc/init.d/rtunn status
+# На Linux
+systemctl status rtunn.service
 
 # На VPS
 netstat -tlpn | grep ssh
@@ -329,7 +413,8 @@ netstat -tlpn | grep ssh
 ### Проблемы с подключением
 1. Проверьте статус SSH сервера:
 ```bash
-systemctl status sshd
+systemctl status ssh    # Debian/Ubuntu (юнит называется ssh)
+systemctl status sshd   # RHEL/Fedora/Alpine
 ```
 
 2. Проверьте открытые порты:
@@ -376,13 +461,23 @@ nethogs
 
 ## Полезные команды
 
-### Управление туннелем на OpenWRT
+### Управление туннелем на OpenWRT / Linux (службы создаёт setup_rtunn.sh)
 ```bash
-/etc/init.d/reverse-tunnel start    # Запуск туннеля
-/etc/init.d/reverse-tunnel stop     # Остановка туннеля
-/etc/init.d/reverse-tunnel restart  # Перезапуск туннеля
-/etc/init.d/reverse-tunnel enable   # Включить автозапуск
-/etc/init.d/reverse-tunnel disable  # Отключить автозапуск
+# Быстрое управление — интерактивный менеджер (создаётся установщиком):
+tunnel
+
+# OpenWrt (procd-служба rtunn):
+/etc/init.d/rtunn start     # Запуск туннеля
+/etc/init.d/rtunn stop      # Остановка туннеля
+/etc/init.d/rtunn restart   # Перезапуск туннеля
+/etc/init.d/rtunn enable    # Включить автозапуск
+/etc/init.d/rtunn disable   # Отключить автозапуск
+/etc/init.d/rtunn status    # Статус
+
+# Linux (systemd unit rtunn.service):
+systemctl restart rtunn.service
+systemctl status rtunn.service
+journalctl -u rtunn.service -f
 ```
 
 ### Управление Fail2Ban на VPS
