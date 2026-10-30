@@ -1,7 +1,9 @@
 #!/bin/sh
 
 # Ссылка на этот скрипт (используется для команды tunnel)
-SCRIPT_URL="https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_reverse_tunnel.sh"
+# По умолчанию — URL того же файла, из которого скрипт был запущен
+# (корректно работает и при переименовании файла в репозитории).
+SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/vkust/setup_reverse_tunnel/main/setup_rtunn.sh}"
 
 # Цвета для вывода
 GREEN='\033[0;32m'
@@ -14,12 +16,14 @@ NC='\033[0m'
 # Глобальные переменные
 OS_TYPE=""
 PKG_MGR=""
+OPENWRT_25=0
 IS_INSTALLED=0
 
+# ВНИМАНИЕ: msg не должен содержать символ % (иначе printf воспримет его как формат)
 print_msg() {
     local color="$1"
     local msg="$2"
-    printf "${color}${msg}${NC}\n"
+    printf "${color}%s${NC}\n" "$msg"
 }
 
 validate_ip() {
@@ -44,7 +48,18 @@ validate_port() {
 detect_os() {
     if [ -f /etc/openwrt_release ]; then
         OS_TYPE="openwrt"
-        PKG_MGR="opkg"
+        # В OpenWrt 25.x классический пакетный менеджер opkg заменён на apk (Alpine).
+        # Проверяем наличие именно opkg, иначе используем apk.
+        if command -v opkg >/dev/null 2>&1; then
+            PKG_MGR="opkg"
+        elif command -v apk >/dev/null 2>&1; then
+            PKG_MGR="apk"
+            OPENWRT_25=1
+            print_msg "$YELLOW" "ℹ Обнаружен OpenWrt с apk вместо opkg (начиная с 25.x пакеты ставятся через 'apk'). Использую apk."
+        else
+            print_msg "$RED" "✗ Ошибка: не найден ни opkg, ни apk — непонятно, как устанавливать пакеты."
+            exit 1
+        fi
     elif command -v systemctl >/dev/null 2>&1; then
         OS_TYPE="systemd"
         if command -v apt-get >/dev/null 2>&1; then PKG_MGR="apt-get"
@@ -53,6 +68,17 @@ detect_os() {
         elif command -v apk >/dev/null 2>&1; then PKG_MGR="apk"
         else print_msg "$RED" "Не удалось определить пакетный менеджер."; exit 1; fi
     else print_msg "$RED" "Поддерживается только OpenWRT или systemd."; exit 1; fi
+}
+
+# Универсальная установка пакетов: pkg_install <пакет...>
+pkg_install() {
+    case "$PKG_MGR" in
+        opkg)   opkg update && opkg install "$@" ;;
+        apk)    apk update 2>/dev/null; apk add "$@" ;;
+        apt-get) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+        yum|dnf) $PKG_MGR install -y "$@" ;;
+        *) return 1 ;;
+    esac
 }
 
 check_installation() {
@@ -72,8 +98,16 @@ create_tunnel_alias() {
     if [ ! -f /usr/bin/tunnel ]; then
         cat > /usr/bin/tunnel << EOF
 #!/bin/sh
-# Используем раздельные флаги или только -O для совместимости с BusyBox
-wget -O /tmp/tunnel_manager.sh "$SCRIPT_URL" >/dev/null 2>&1
+# Скачивание скрипта: wget (BusyBox/OpenWrt) или curl (обычная Linux)
+dl() {
+    if command -v wget >/dev/null 2>&1; then
+        wget -O /tmp/tunnel_manager.sh "$SCRIPT_URL" >/dev/null 2>&1
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o /tmp/tunnel_manager.sh "$SCRIPT_URL" >/dev/null 2>&1
+    fi
+}
+dl
+if [ ! -s /tmp/tunnel_manager.sh ]; then sleep 2; dl; fi
 if [ -s /tmp/tunnel_manager.sh ]; then
     sh /tmp/tunnel_manager.sh
 else
@@ -193,23 +227,40 @@ setup_ssh() {
     local ssh_type="$1"
     if [ "$OS_TYPE" = "openwrt" ]; then
         if [ "$ssh_type" = "dropbear" ]; then
-            if ! command -v dbclient >/dev/null 2>&1; then opkg update && opkg install dropbear || exit 1; fi
-            SSH_CMD="dbclient"
+            # В новых OpenWrt (25.x) dbclient входит в базовую систему, opkg там отсутствует
+            if ! command -v dbclient >/dev/null 2>&1; then
+                pkg_install dropbear || exit 1
+            fi
+            SSH_CMD="$(command -v dbclient)"
         else
             local needs_install=0
             if ! command -v ssh >/dev/null 2>&1 || ssh -V 2>&1 | grep -qi dropbear; then needs_install=1; fi
             if ! command -v ssh-keygen >/dev/null 2>&1; then needs_install=1; fi
-            
-            if [ "$needs_install" -eq 1 ]; then 
-                opkg update && opkg install openssh-client openssh-keygen || exit 1
+
+            if [ "$needs_install" -eq 1 ]; then
+                # openssh-keygen существует только в старых репозиториях (opkg);
+                # в apk-репозиториях ключогенератор уже входит в openssh-client
+                if [ "$PKG_MGR" = "opkg" ]; then
+                    pkg_install openssh-client openssh-keygen || exit 1
+                else
+                    pkg_install openssh-client || exit 1
+                fi
             fi
-            SSH_CMD="/usr/bin/ssh"
+            SSH_CMD="$(command -v ssh)"
+            # Если пакетный менеджер не смог поставить ssh (например, нет интернета) —
+            # не глушим службу пустым путём: падаем сразу с понятной ошибкой.
+            if [ -z "$SSH_CMD" ]; then
+                print_msg "$RED" "✗ Ошибка: после установки команда 'ssh' так и не найдена в PATH."
+                exit 1
+            fi
         fi
     else
         if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
-            if [ "$PKG_MGR" = "apt-get" ]; then apt-get update && apt-get install -y openssh-client
-            elif [ "$PKG_MGR" = "yum" ] || [ "$PKG_MGR" = "dnf" ]; then $PKG_MGR install -y openssh-clients
-            elif [ "$PKG_MGR" = "apk" ]; then apk add openssh-client; fi
+            case "$PKG_MGR" in
+                apt-get) pkg_install openssh-client || exit 1 ;;
+                yum|dnf) pkg_install openssh-clients || exit 1 ;;
+                apk)     pkg_install openssh-client || exit 1 ;;
+            esac
         fi
         SSH_CMD="$(command -v ssh)"
         ssh_type="openssh"
@@ -223,8 +274,17 @@ generate_ssh_keys() {
     if [ ! -f /root/.ssh/id_rsa ]; then
         print_msg "$BLUE" "Генерация ключа..."
         if [ "$ssh_type" = "dropbear" ]; then
-            dropbearkey -t rsa -f /root/.ssh/id_rsa
-            dropbearkey -y -f /root/.ssh/id_rsa | grep "^ssh-rsa" > /root/.ssh/id_rsa.pub
+            # dropbearkey есть в базовой системе любого OpenWrt (даже 25.x, где нет opkg)
+            if command -v dropbearkey >/dev/null 2>&1; then
+                dropbearkey -t rsa -f /root/.ssh/id_rsa
+                dropbearkey -y -f /root/.ssh/id_rsa | grep "^ssh-rsa" > /root/.ssh/id_rsa.pub
+            elif command -v ssh-keygen >/dev/null 2>&1; then
+                print_msg "$YELLOW" "ℹ dropbearkey не найден — генерирую ключ через ssh-keygen."
+                ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
+            else
+                print_msg "$RED" "✗ Ошибка: нет ни dropbearkey, ни ssh-keygen для генерации ключа!"
+                exit 1
+            fi
         else
             ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
         fi
@@ -259,9 +319,16 @@ copy_ssh_key() {
     local REMOTE_CMD="mkdir -p ~/.ssh && echo \"$PUB_KEY\" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && chmod 700 ~/.ssh"
     
     if [ "$ssh_type" = "dropbear" ]; then
-        dbclient -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
+        DBCLIENT="$(command -v dbclient)"
+        # Первый запуск: разрешаем интерактивный ввод пароля (StrictHostKeyChecking=no
+        # dbclient берёт из /etc/ssh/ssh_config, созданного setup_ssh_config)
+        "$DBCLIENT" -p "$ssh_port" "${vps_user}@${vps_ip}" "$REMOTE_CMD"
         print_msg "$BLUE" "Проверка входа по ключу..."
-        if dbclient -y -i /root/.ssh/id_rsa -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" < /dev/null 2>&1 | grep -q "OK"; then
+        # Проверяем вход именно по ключу. Сначала с -B (не запрашивать пароль);
+        # если флаг не поддерживается старой версией dbclient — повторяем без него.
+        if "$DBCLIENT" -n -B -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" < /dev/null 2>/dev/null | grep -q "OK"; then
+            print_msg "$GREEN" "✓ Ключ успешно настроен!"
+        elif "$DBCLIENT" -n -p "$ssh_port" "${vps_user}@${vps_ip}" "echo OK" < /dev/null 2>/dev/null | grep -q "OK"; then
             print_msg "$GREEN" "✓ Ключ успешно настроен!"
         else
             print_msg "$RED" "\n✗ Ошибка: VPS отклонил вход по ключу."
@@ -325,23 +392,39 @@ start_service() {
     config_get vps_ip general vps_ip
     config_get ssh_port general ssh_port "22"
     
-    local ssh_cmd="/usr/bin/ssh"
-    if command -v ssh >/dev/null 2>&1 && ssh -V 2>&1 | grep -qi dropbear; then ssh_cmd="$(command -v dbclient)"
-    elif ! command -v ssh >/dev/null 2>&1; then ssh_cmd="$(command -v dbclient)"; fi
-    
+    local ssh_cmd=""
+    # Предпочитаем OpenSSH, если он реально установлен (не symlink на dbclient)
+    if command -v ssh >/dev/null 2>&1 && ! ssh -V 2>&1 | grep -qi dropbear; then
+        ssh_cmd="$(command -v ssh)"
+    elif command -v dbclient >/dev/null 2>&1; then
+        # Dropbear входит в базовую систему любого OpenWrt (старого и нового)
+        ssh_cmd="$(command -v dbclient)"
+    else
+        echo "rtunn: не найден ни ssh, ни dbclient" >&2
+        return 1
+    fi
+
     procd_open_instance
     procd_set_param command "$ssh_cmd"
     procd_append_param command -NT -i /root/.ssh/id_rsa
     
     # Флаги поддержания активности соединения в зависимости от клиента
-    if [ "$ssh_cmd" = "/usr/bin/ssh" ]; then
-        procd_append_param command -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes
-    else
-        procd_append_param command -K 30
-    fi
+    case "$ssh_cmd" in
+        */dbclient)
+            # keepalive каждые 30 сек; -o KeepAlive поддерживается всеми версиями Dropbear
+            procd_append_param command -o KeepAlive=30
+            ;;
+        *)
+            procd_append_param command -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes
+            ;;
+    esac
 
     config_foreach append_tunnel tunnel
-    procd_append_param command "${vps_user}@${vps_ip}" -y -p "${ssh_port}"
+    # dbclient не понимает флаг -y (это опция ssh-keygen), добавляем его только для OpenSSH
+    case "$ssh_cmd" in
+        */dbclient) procd_append_param command "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
+        *) procd_append_param command -y "${vps_user}@${vps_ip}" -p "${ssh_port}" ;;
+    esac
     
     # OpenWrt 25 respawn (порог_времени таймаут кол-во_попыток) - 0 для бесконечного рестарта
     procd_set_param respawn 3600 5 0
@@ -385,7 +468,8 @@ EOF
 
 # --- Интерфейс пользователя ---
 show_header() {
-    clear
+    # clear может отсутствовать в минимальных системах (BusyBox без coreutils)
+    command -v clear >/dev/null 2>&1 && clear || printf '\033[2J\033[H'
     printf "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}\n"
     printf "${BLUE}║      Менеджер обратных SSH-туннелей (OpenWRT & Linux)      ║${NC}\n"
     printf "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
@@ -477,4 +561,3 @@ main() {
 }
 
 main "$@"
-```<FollowUp></FollowUp><ElicitationsGroup></ElicitationsGroup>
