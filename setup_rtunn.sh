@@ -262,11 +262,13 @@ show_current_config() {
         local v_port=$(uci -q get rtunn.general.ssh_port)
         printf "VPS Сервер:  ${GREEN}%s@%s${NC} (Порт: %s)\n" "$v_user" "$v_ip" "$v_port"
         echo "Туннели:"
+        local idx=1
         for section in $(uci show rtunn 2>/dev/null | grep '=tunnel' | cut -d= -f1); do
             local r=$(uci -q get ${section}.remote_port)
             local l=$(uci -q get ${section}.local_port)
             local h=$(uci -q get ${section}.local_host)
-            printf "  ► VPS порт ${YELLOW}%-5s${NC} -> Локально ${YELLOW}%s:%s${NC}\n" "$r" "$h" "$l"
+            printf "  %2d) VPS порт ${YELLOW}%-5s${NC} -> Локально ${YELLOW}%s:%s${NC}\n" "$idx" "$r" "$h" "$l"
+            idx=$((idx+1))
         done
         printf "Статус: "
         /etc/init.d/rtunn status
@@ -277,12 +279,14 @@ show_current_config() {
         local v_port=$(echo "$exec_line" | grep -oE -- '-p [0-9]+' | awk '{print $2}')
         printf "VPS Сервер:  ${GREEN}%s@%s${NC} (Порт: %s)\n" "$v_user" "$v_ip" "$v_port"
         echo "Туннели:"
+        local idx=1
         echo "$exec_line" | grep -oE -- '-R [0-9]+:[a-zA-Z0-9.-]+:[0-9]+' | while read -r tunnel; do
             local ports=$(echo "$tunnel" | awk '{print $2}')
             local r=$(echo "$ports" | cut -d: -f1)
             local h=$(echo "$ports" | cut -d: -f2)
             local l=$(echo "$ports" | cut -d: -f3)
-            printf "  ► VPS порт ${YELLOW}%-5s${NC} -> Локально ${YELLOW}%s:%s${NC}\n" "$r" "$h" "$l"
+            printf "  %2d) VPS порт ${YELLOW}%-5s${NC} -> Локально ${YELLOW}%s:%s${NC}\n" "$idx" "$r" "$h" "$l"
+            idx=$((idx+1))
         done
         printf "Статус: "
         systemctl is-active rtunn.service
@@ -347,6 +351,109 @@ add_tunnel_to_existing() {
         systemctl daemon-reload && systemctl restart rtunn.service
     fi
     print_msg "$GREEN" "✓ Туннель успешно добавлен и запущен!"
+}
+
+# Удаление конкретного туннеля по его порядковому номеру из списка
+delete_tunnel() {
+    print_msg "$BLUE" "\n--- Удаление туннеля ---"
+
+    if [ "$(service_kind)" = "openwrt" ]; then
+        # Собираем секции tunnel в порядке их объявления (нумерация как в show_current_config)
+        sections=$(uci show rtunn 2>/dev/null | grep '=tunnel' | cut -d= -f1)
+        if [ -z "$sections" ]; then
+            print_msg "$RED" "✗ Нет ни одного настроенного туннеля."
+            return 1
+        fi
+        i=1
+        for s in $sections; do
+            r=$(uci -q get ${s}.remote_port); l=$(uci -q get ${s}.local_port); h=$(uci -q get ${s}.local_host)
+            printf "  %2d) VPS порт ${YELLOW}%-5s${NC} -> Локально ${YELLOW}%s:%s${NC}\n" "$i" "$r" "$h" "$l"
+            i=$((i+1))
+        done
+        total=$((i-1))
+        printf "Номер туннеля для удаления (0 — отмена): "
+        read -r choice < /dev/tty
+        case "$choice" in
+            0) print_msg "$YELLOW" "Отменено."; return 0;;
+            ''|*[!0-9]*) print_msg "$RED" "✗ Введите число от 1 до $total."; return 1;;
+        esac
+        if [ "$choice" -lt 1 ] || [ "$choice" -gt "$total" ]; then
+            print_msg "$RED" "✗ Введите число от 1 до $total."
+            return 1
+        fi
+        target=$(echo "$sections" | sed -n "${choice}p")
+        r=$(uci -q get ${target}.remote_port); l=$(uci -q get ${target}.local_port); h=$(uci -q get ${target}.local_host)
+        printf "Удалить туннель: VPS порт %s -> %s:%s ? (y/N): " "$r" "$h" "$l"
+        read -r confirm < /dev/tty
+        [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { print_msg "$YELLOW" "Отменено."; return 0; }
+        uci delete rtunn.${target##*.}
+        uci commit rtunn
+        print_msg "$YELLOW" "Перезапуск службы..."
+        /etc/init.d/rtunn restart
+    else
+        svc_file=/etc/systemd/system/rtunn.service
+        exec_line=$(grep "^ExecStart=" "$svc_file" 2>/dev/null)
+        [ -z "$exec_line" ] && { print_msg "$RED" "✗ Не найден ExecStart в $svc_file"; return 1; }
+        # Убираем префикс "ExecStart=" — дальше работаем с чистой командной строкой,
+        # а при записи добавляем префикс заново (иначе он удвоился бы).
+        exec_line=${exec_line#ExecStart=}
+        tunnels=$(echo "$exec_line" | grep -oE -- '-R [0-9]+:[a-zA-Z0-9.-]+:[0-9]+' | sed 's/^-R //')
+        if [ -z "$tunnels" ]; then
+            print_msg "$RED" "✗ Нет ни одного настроенного туннеля."
+            return 1
+        fi
+        i=1
+        for t in $tunnels; do
+            r=$(echo "$t" | cut -d: -f1); h=$(echo "$t" | cut -d: -f2); l=$(echo "$t" | cut -d: -f3)
+            printf "  %2d) VPS порт ${YELLOW}%-5s${NC} -> Локально ${YELLOW}%s:%s${NC}\n" "$i" "$r" "$h" "$l"
+            i=$((i+1))
+        done
+        total=$((i-1))
+        printf "Номер туннеля для удаления (0 — отмена): "
+        read -r choice < /dev/tty
+        case "$choice" in
+            0) print_msg "$YELLOW" "Отменено."; return 0;;
+            ''|*[!0-9]*) print_msg "$RED" "✗ Введите число от 1 до $total."; return 1;;
+        esac
+        if [ "$choice" -lt 1 ] || [ "$choice" -gt "$total" ]; then
+            print_msg "$RED" "✗ Введите число от 1 до $total."
+            return 1
+        fi
+        target=$(echo "$tunnels" | sed -n "${choice}p")
+        r=$(echo "$target" | cut -d: -f1); h=$(echo "$target" | cut -d: -f2); l=$(echo "$target" | cut -d: -f3)
+        printf "Удалить туннель: VPS порт %s -> %s:%s ? (y/N): " "$r" "$h" "$l"
+        read -r confirm < /dev/tty
+        [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { print_msg "$YELLOW" "Отменено."; return 0; }
+
+        # Удаляем нужный аргумент -R из ExecStart, пересобирая строку целиком
+        new_exec=""
+        idx=0
+        skip_next=0
+        for tok in $exec_line; do
+            if [ "$tok" = "ExecStart=" ]; then
+                continue   # префикс добавим при записи заново
+            fi
+            if [ "$tok" = "-R" ]; then
+                idx=$((idx+1))
+                if [ "$idx" -eq "$choice" ]; then
+                    skip_next=1
+                    continue
+                fi
+            fi
+            if [ "$skip_next" = "1" ]; then
+                skip_next=0
+                continue
+            fi
+            new_exec="$new_exec $tok"
+        done
+        new_exec=$(echo "$new_exec" | sed 's/^ //')
+        cp "$svc_file" "${svc_file}.bak"
+        esc=$(printf '%s' "$new_exec" | sed 's/[&|\\]/\\&/g')
+        sed -i "s|^ExecStart=.*|ExecStart=$esc|" "$svc_file"
+        print_msg "$YELLOW" "Перезапуск службы..."
+        systemctl daemon-reload && systemctl restart rtunn.service
+    fi
+    print_msg "$GREEN" "✓ Туннель удалён и служба перезапущена!"
 }
 
 # --- 3. Базовые функции установки ---
@@ -710,6 +817,7 @@ main() {
         printf "  2) Перезапустить службу\n"
         printf "  3) Полностью перенастроить службу (заменить все)\n"
         printf "  4) ${RED}Удалить службу из системы${NC}\n"
+        printf "  5) Удалить конкретный туннель\n"
         printf "  0) Выход\n"
         
         while true; do
@@ -720,8 +828,9 @@ main() {
                 2) restart_service; break;;
                 3) print_msg "$YELLOW" "Запуск первоначальной настройки..."; run_wizard; break;;
                 4) uninstall_service; break;;
+                5) delete_tunnel; break;;
                 0) exit 0;;
-                *) print_msg "$RED" "Неверный выбор. Введите 1, 2, 3, 4 или 0.";;
+                *) print_msg "$RED" "Неверный выбор. Введите 1, 2, 3, 4, 5 или 0.";;
             esac
         done
     else
